@@ -317,17 +317,17 @@ def pad_image_to_patch_grid(image: np.ndarray, patch_size: int):
     )
     return padded, [width, height]
 
-
+# -> [px, py]	将地理坐标（UTM 等）通过 rasterio 的逆仿射变换转为像素坐标（浮点数）。
 def coord_to_pixel(coord, inverse_transform):
     x, y = float(coord[0]), float(coord[1])
     px, py = inverse_transform * (x, y)
     return [float(px), float(py)]
 
-
+# 将 `LineString` 的所有顶点转为像素坐标。
 def line_to_pixel_coords(line: LineString, inverse_transform):
     return [coord_to_pixel(coord, inverse_transform) for coord in line.coords]
 
-
+# 将多边形（含内环）转为像素坐标的 Shapely Polygon。
 def polygon_to_pixel_polygon(poly: Polygon, inverse_transform):
     exterior = [coord_to_pixel(coord, inverse_transform) for coord in poly.exterior.coords]
     interiors = [
