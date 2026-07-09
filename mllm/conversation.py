@@ -554,6 +554,35 @@ conv_qwen_3 = Conversation(
     sep_style=SeparatorStyle.QWEN_2,
     sep="<|im_end|>\n",
 )
+conv_qwen_2_lane_given_intersection = Conversation(
+    system=(
+        "<|im_start|>system\n"
+        "You are a road-centerline reconstruction assistant for BEV road patches.\n"
+        "The intersection geometry for this patch is provided as ground truth in the prompt.\n"
+        "Use it as context to predict only the lane centerline polylines.\n"
+        "Return only valid JSON in the required schema, with start_type and end_type for every line.\n"
+        "Do not output intersection records.\n"
+        "Keep all coordinates in the patch-local coordinate system."
+    ),
+    roles=("<|im_start|>user\n", "<|im_start|>assistant\n"),
+    version="qwen_v2",
+    messages=(),
+    offset=0,
+    sep_style=SeparatorStyle.QWEN_2,
+    sep="<|im_end|>\n",
+)
+
+
+
+
+# --map_task value to conversation template key resolution
+TASK_TEMPLATES = {
+    "lane": "conv_qwen_3_Dinov2_huawei",
+    "lane_intersection": "conv_qwen_3_state_update_centerline",
+    "lane_given_intersection": "lane_given_intersection",
+}
+
+
 
 default_conversation = conv_qwen_2
 conv_templates = {
@@ -567,6 +596,7 @@ conv_templates = {
     "conv_qwen_3_Dinov2_huawei": conv_qwen_3_Dinov2_huawei,
     "conv_qwen_2_state_update_centerline": conv_qwen_2_state_update_centerline,
     "conv_qwen_3_state_update_centerline": conv_qwen_3_state_update_centerline,
+    "lane_given_intersection": conv_qwen_2_lane_given_intersection,
     "llama_2": conv_llama_2,
     "mistral_instruct": conv_mistral_instruct,
     "chatml_direct": conv_chatml_direct,

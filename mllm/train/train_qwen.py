@@ -1188,6 +1188,7 @@ class DataArguments:
     train_sample_limit: Optional[int] = field(default=None)
     eval_sample_limit: Optional[int] = field(default=None)
     sample_seed: int = field(default=42)
+    map_task: str = field(default="lane_intersection")
 
 
 @dataclass
@@ -2226,7 +2227,26 @@ class LazySupervisedDataset(Dataset):
                 image = process_anyres_image(image, self.data_args.image_processor, self.data_args.image_grid_pinpoints)
             else:
                 image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
-            sources = preprocess_multimodal(
+        # lane_given_intersection: inject intersection GT into prompt, remove from target
+        if self.data_args.map_task == "lane_given_intersection" and len(sources) >= 1 and len(sources[0]) >= 2:
+            convs = sources[0]
+            if convs[1]["from"] == "gpt":
+                try:
+                    gt = json.loads(convs[1]["value"])
+                    lines = gt.get("lines", []) if isinstance(gt, dict) else (gt if isinstance(gt, list) else [])
+                    centerlines = [l for l in lines if l.get("category", "centerline") == "centerline"]
+                    intersections = [l for l in lines if l.get("category") == "intersection"]
+                    if intersections or centerlines != lines:
+                        inter_json = json.dumps(intersections, ensure_ascii=False, separators=(",", ":"))
+                        convs[0]["value"] += (
+                            "\n\nIntersection geometry for this patch (ground truth):\n"
+                            + inter_json
+                            + "\n\nUse the intersection geometry as known context. Predict only the lane centerlines."
+                        )
+                        convs[1]["value"] = json.dumps({"lines": centerlines}, ensure_ascii=False, separators=(",", ":"))
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    pass
+        sources = preprocess_multimodal(
                 copy.deepcopy([e["conversations"] for e in sources]),
                 self.data_args)
         else:
@@ -2577,10 +2597,14 @@ def train(attn_implementation=None):
         else:
             tokenizer.legacy = False
         if model_args.version in conversation_lib.conv_templates:
-            # print('version:', model_args.version)
             conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
         else:
-            conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
+            from mllm.conversation import TASK_TEMPLATES
+            tn = TASK_TEMPLATES.get(data_args.map_task, "")
+            if tn and tn in conversation_lib.conv_templates:
+                conversation_lib.default_conversation = conversation_lib.conv_templates[tn]
+            else:
+                conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
 
     sync_qwen_token_config(
         tokenizer=tokenizer,

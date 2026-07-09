@@ -952,7 +952,7 @@ def main():
     parser.add_argument("--eval-meter-per-pixel", type=float, default=0.2)
     parser.add_argument("--eval-buffer-size", type=float, default=1.0)
     parser.add_argument("--eval-match-threshold", type=float, default=0.33)
-    parser.add_argument("--map-task", choices=["lane", "lane_intersection"], default="lane_intersection")
+    parser.add_argument("--map_task", "--map-task", choices=["lane", "lane_intersection", "lane_given_intersection"], default="lane_intersection")
     parser.add_argument("--patch-size", type=int, default=256)
     parser.add_argument("--coord-mode", choices=["auto", COORD_MODE_PIXEL, COORD_MODE_NORM1000], default="auto")
     parser.add_argument("--coord-range", type=int, default=DEFAULT_COORD_RANGE)
@@ -973,6 +973,9 @@ def main():
     checkpoint_dir = Path(args.checkpoint_dir)
     manifest = read_manifest(checkpoint_dir)
 
+    if not args.conv_template:
+        from mllm.conversation import TASK_TEMPLATES
+        args.conv_template = TASK_TEMPLATES.get(args.map_task, "")
     conv_template = args.conv_template or manifest.get("version") or ""
     if not conv_template or conv_template not in conversation_lib.conv_templates:
         qwen_family = qwen_family_from_text(
@@ -1045,6 +1048,16 @@ def main():
 
         if args.prompt_mode == "dataset" and record.get("conversations"):
             prompt_text = record["conversations"][0]["value"]
+            if args.map_task == "lane_given_intersection" and len(record.get("conversations", [])) > 1:
+                try:
+                    gt = json.loads(record["conversations"][1]["value"])
+                    lines_gt = gt.get("lines", []) if isinstance(gt, dict) else (gt if isinstance(gt, list) else [])
+                    intersections = [l for l in lines_gt if l.get("category") == "intersection"]
+                    if intersections:
+                        inter_json = json.dumps(intersections, ensure_ascii=False, separators=(",", ":"))
+                        prompt_text += "\n\nIntersection geometry for this patch (ground truth):\n" + inter_json + "\n\nUse the intersection geometry as known context. Predict only the lane centerlines."
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    pass
         else:
             prompt_text = args.prompt
         prompt = build_prompt(prompt_text, conv_template)
@@ -1088,9 +1101,10 @@ def main():
         parsed_items_pixel = []
         parse_error = ""
         try:
+            effective_map_task = "lane" if args.map_task == "lane_given_intersection" else args.map_task
             parsed_items = parse_centerline_json(
                 prediction_json,
-                map_task=args.map_task,
+                map_task=effective_map_task,
                 patch_size=coord_cfg["patch_size"],
                 coord_mode=coord_cfg["coord_mode"],
                 coord_range=coord_cfg["coord_range"],

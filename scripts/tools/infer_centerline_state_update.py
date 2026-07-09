@@ -184,7 +184,7 @@ def build_eval_payload(records, args, evaluate_records_fn, evaluate_lane_interse
         buffer_size=args.eval_buffer_size,
         match_threshold=args.eval_match_threshold,
     )
-    if args.include_intersections:
+    if args.include_intersections and args.map_task != "lane_given_intersection":
         map_eval = evaluate_lane_intersection_records_fn(records, **eval_kwargs)
         return {
             "centerline_eval": map_eval["lane"],
@@ -196,7 +196,7 @@ def build_eval_payload(records, args, evaluate_records_fn, evaluate_lane_interse
 
 
 def print_eval_payload(eval_payload, args, print_eval_table_fn, print_lane_intersection_eval_tables_fn):
-    if args.include_intersections:
+    if args.include_intersections and args.map_task != "lane_given_intersection":
         print_lane_intersection_eval_tables_fn(eval_payload["map_eval"])
     else:
         print_eval_table_fn(eval_payload)
@@ -204,7 +204,7 @@ def print_eval_payload(eval_payload, args, print_eval_table_fn, print_lane_inter
 
 def eval_console_payload(eval_path, eval_payload, args):
     payload = {"eval_json": str(eval_path), "centerline_eval_json": str(eval_path)}
-    if args.include_intersections:
+    if args.include_intersections and args.map_task != "lane_given_intersection":
         payload.update({
             "centerline_eval": eval_payload["centerline_eval"],
             "intersection_eval": eval_payload["intersection_eval"],
@@ -671,7 +671,8 @@ def main():
     parser.add_argument("--merged-output-json", default="", help="Optional path for merged global map JSON.")
     parser.add_argument("--whole-map-viz-dir", default="", help="Directory for stitched whole-map visualizations. Defaults to output-json sibling whole_map_viz/.")
     parser.add_argument("--skip-whole-map-viz", action="store_true", help="Disable stitched whole-map visualization output.")
-    parser.add_argument("--conv-template", default="conv_qwen_3_state_update_centerline")
+    parser.add_argument("--map_task", "--map-task", choices=["lane", "lane_intersection", "lane_given_intersection"], default="lane_intersection")
+parser.add_argument("--conv-template", default="conv_qwen_3_state_update_centerline")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--patch-size", type=int, default=256)
     parser.add_argument("--coord-mode", choices=["auto", COORD_MODE_PIXEL, COORD_MODE_NORM1000], default="auto")
@@ -700,6 +701,10 @@ def main():
     parser.add_argument("--world-size", type=int, default=None, help="Override world size. Defaults to WORLD_SIZE env.")
     parser.add_argument("--distributed-merge-timeout", type=int, default=7200, help="Seconds rank0 waits for rank summaries.")
     args = parser.parse_args()
+    # Auto-resolve conv_template from --map_task
+    if not args.conv_template:
+        from mllm.conversation import TASK_TEMPLATES
+        args.conv_template = TASK_TEMPLATES.get(args.map_task, "") or "conv_qwen_3_state_update_centerline"
 
     evaluate_records = print_eval_table = None
     evaluate_lane_intersection_records = print_lane_intersection_eval_tables = None
@@ -819,6 +824,17 @@ def main():
             coord_range=coord_cfg["coord_range"],
         )
 
+        if args.map_task == "lane_given_intersection" and len(record.get("conversations", [])) > 1:
+            try:
+                gt = json.loads(record["conversations"][1]["value"])
+                lines_gt = gt.get("lines", []) if isinstance(gt, dict) else (gt if isinstance(gt, list) else [])
+                intersections = [l for l in lines_gt if l.get("category") == "intersection"]
+                if intersections:
+                    inter_json = json.dumps(intersections, ensure_ascii=False, separators=(",", ":"))
+                    prompt_text += "\n\nIntersection geometry for this patch (ground truth):\n" + inter_json + "\n\nUse the intersection geometry as known context. Predict only the lane centerlines."
+            except (json.JSONDecodeError, KeyError, TypeError):
+                pass
+
         parse_ok = False
         parsed_lines_model = []
         parsed_lines = []
@@ -851,7 +867,7 @@ def main():
         try:
             parsed_lines_model = parse_map_json(
                 prediction,
-                map_task="lane_intersection" if args.include_intersections else "lane",
+                map_task=("lane" if args.map_task == "lane_given_intersection" else ("lane_intersection" if args.include_intersections else "lane")),
                 patch_size=coord_cfg["patch_size"],
                 coord_mode=coord_cfg["coord_mode"],
                 coord_range=coord_cfg["coord_range"],
