@@ -3,7 +3,7 @@
 
 # ============================================================
 # NPU 推理评估
-# 固定配方：phase_b | lane_given_intersection | dinov2 + CapRL-Qwen3VL-4B | 无 DeepStack
+# 固定配方：phase_a | 车道+路口 | dinov2 + CapRL-Qwen3VL-4B | 无 DeepStack
 # 本文件自包含，不调用其他项目 .sh 文件。
 # 对应训练脚本：scripts/npu/train/train_sft_stage_a_lane_intersection_dinov2_qwen3vl_caprl4b_nodeepstack_npu.sh
 # ============================================================
@@ -24,8 +24,8 @@ LOG_FILE="${LOG_DIR}/eval_${RUN_TIME}.log"
 exec > >(tee -a ${LOG_FILE}) 2>&1
 
 # 配方标识：固定任务、视觉架构、模型系列和训练变体。
-DATASET_PHASE=phase_b                                                             # 数据集阶段：phase_a 为 patch 推理，phase_b 为状态更新。
-MAP_TASK=lane_given_intersection                                                        # 任务类型：lane 或 lane_intersection。
+DATASET_PHASE=phase_a                                                             # 数据集阶段：phase_a 为 patch 推理，phase_b 为状态更新。
+MAP_TASK=lane_intersection                                                        # 任务类型：lane 或 lane_intersection。
 VISION_BACKBONE=dinov2                                                            # 视觉骨干选择器，由通用多视觉启动器使用。
 # 本配方的视觉资产。脚本仅下载下面声明的视觉塔。
 VISION_TOWER_NAME=facebook_dinov2-large                                           # MODEL_OBS_PATH 下的视觉塔目录名。
@@ -60,7 +60,7 @@ DATASET_PATH=${DATASET_PATH:-${DATASET_EXTRACT_ROOT}/${DATASET_DIR_NAME}} # 解�
 IMAGE_FOLDER=${IMAGE_FOLDER:-${DATASET_PATH}} # 传给推理的图像根目录，通常即 DATASET_PATH。
 TEST_JSON=${TEST_JSON:-${DATASET_PATH}/${DATASET_PHASE}/test.jsonl} # 所选数据集阶段的推理 JSONL 路径。
 CHECKPOINT_DOWNLOAD_ROOT=${CHECKPOINT_DOWNLOAD_ROOT:-${OBS_CACHE}/checkpoints/inputs/checkpoints_${RUN_ID}}  # 从 OBS 下载检查点候选的本地根目录。
-LOCAL_OUTPUT_ROOT=${LOCAL_OUTPUT_ROOT:-${OBS_CACHE}/results/test_phase_b_lane_given_intersection_output_${RUN_ID}}  # 每次运行的本地推理输出根目录。
+LOCAL_OUTPUT_ROOT=${LOCAL_OUTPUT_ROOT:-${OBS_CACHE}/results/test_phase_a_lane_intersection_dinov2_caprl4b_output_${RUN_ID}}  # 每次运行的本地推理输出根目录。
 CLOUD_OUTPUT_DIR=${TEST_RESULT_OBS:-${OSB_SHARE_PATH%/}/test_results_${RUN_ID}}   # 最终的云输出目录，用于推理或 GRPO 结果。
 
 # ====================== 推理参数 ======================
@@ -166,7 +166,7 @@ else
 fi
 MASTER_PORT=${MASTER_PORT:-6060}                                                  # 分布式会合主端口。
 export NNODES NODE_RANK NPROC_PER_NODE MASTER_ADDR MASTER_PORT
-export RDZV_ID=${RDZV_ID:-test_phase_b_lane_given_intersection_${RUN_ID}}       # 本次分布式运行的唯一会合 ID。
+export RDZV_ID=${RDZV_ID:-test_phase_a_lane_intersection_caprl4b_${RUN_ID}}       # 本次分布式运行的唯一会合 ID。
 # 下载视觉编码器和数据集到本地缓存，然后验证所需的本地路径。
 python -c "import moxing as mox; mox.file.copy_parallel('${MODEL_OBS_PATH}/${VISION_TOWER_NAME}', '${VISION_TOWER}')"
 python -c "import moxing as mox; mox.file.copy('${DATASET_OBS_PATH}', '${DATASET_ZIP_PATH}')"
@@ -335,14 +335,16 @@ torchrun \
     --node_rank="${NODE_RANK}" \
     --master_addr="${MASTER_ADDR}" \
     --master_port="${MASTER_PORT}" \
-    scripts/tools/infer_centerline_state_update.py \
+    scripts/tools/infer_centerline_checkpoint.py \
     --checkpoint-dir "${checkpoint_dir}" \
     --vision_tower "${VISION_TOWER}" \
     --mm_vision_tower_type "${MM_VISION_TOWER_TYPE}" \
     --input_image_size "${INPUT_IMAGE_SIZE}" \
     --disable_deepstack \
-    --patch-json "${TEST_JSON}" \
+    --test-json "${TEST_JSON}" \
+    --num-samples "${NUM_TEST_SAMPLES}" \
     --image-folder "${IMAGE_FOLDER}" \
+    --prompt-mode dataset \
     --map-task "${MAP_TASK}" \
     --patch-size 256 \
     --coord-mode "${COORD_MODE}" \
@@ -351,13 +353,6 @@ torchrun \
     --output-dir "${output_dir}" \
     --sample-json-dir "${json_dir}" \
     --output-json "${summary_json}" \
-    --merged-output-json "${merged_global_json}" \
-    --whole-map-viz-dir "${whole_map_viz_dir}" \
-    --boundary-tol 2.0 \
-    --trace-points 3 \
-    --trace-sample-distance-px 5.0 \
-    --distributed-by-tile \
-    --distributed-merge-timeout 7200 \
     --temperature 0.0 \
     --max-new-tokens "${MAX_NEW_TOKENS}" \
     --eval-centerline \
@@ -373,19 +368,17 @@ torchrun \
       --output-dir "${patch_viz_dir}" \
       --eval-output-json "${eval_json}" \
       --whole-map-viz-dir "${whole_map_viz_dir}" \
-      --map-task "${MAP_TASK}" \
+      --map-task lane_intersection
   # 打印车道+路口评估指标表格。
   if [ -f "${eval_json}" ]; then
     python - "${eval_json}" <<'PY'
 import json
 import sys
 from pathlib import Path
-# 改为只打印 lane 指标表格：
-from infer_index.line_eval import format_eval_table
+from infer_index.line_eval import print_lane_intersection_eval_tables
 payload = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-p = payload.get('summary', payload) if isinstance(payload, dict) else payload
-t = p.get('table') if isinstance(p, dict) and p.get('table') else format_eval_table(p)
-print(t)
+map_eval = payload.get('map_eval', payload) if isinstance(payload, dict) else payload
+print_lane_intersection_eval_tables(map_eval)
 PY
   fi
 }

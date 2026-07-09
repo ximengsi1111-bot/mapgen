@@ -16,7 +16,7 @@ RUN_TIME=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="${LOG_DIR}/train_${RUN_TIME}.log"
 exec > >(tee -a ${LOG_FILE}) 2>&1
 
-# ====================== 模型配方 ======================
+# 选择模型配方
 DATASET_PHASE=phase_b # 数据集阶段：phase_a是单patch推理；phase_b是状态更新推理
 MAP_TASK=lane_intersection # 任务类型: lane or lane_intersection.
 VISION_BACKBONE=dinov2 # Visual backbone selector used by the generic multi-vision launcher.
@@ -25,7 +25,7 @@ VISION_TOWER_NAME=facebook_dinov2-large # Single vision tower directory name und
 MM_VISION_TOWER_TYPE=dinov2 # Model-side vision tower type: dinov2, dinov3, multi_moe, or multi_concat.
 INPUT_IMAGE_SIZE=518 # Image size fed to the vision encoder; DINOv3 recipes usually use 512.
 
-# ====================== DI输出根路径 ======================
+# # ====================== DI输出根路径 ======================
 CLUSTER_SAVE=${OUTPUT_URL} # DI训练平台输出结果的保存路径
 OSB_SHARE_PATH="${CLUSTER_SAVE}"
 
@@ -169,7 +169,6 @@ MASTER_PORT=${MASTER_PORT:-6060} # 分布式通信主节点端口
 export NNODES NODE_RANK NPROC_PER_NODE MASTER_ADDR MASTER_PORT
 export RDZV_ID=${RDZV_ID:-sft_phase_a_lane_intersection_dinov2_${RUN_ID}} # 当前分布式任务唯一进程组标识，避免多任务通信串扰
 
-
 mkdir -p "${LOCAL_MODEL_SAVE_PATH}"
 OUTPUT_PATH="${LOCAL_MODEL_SAVE_PATH}" # 传给训练脚本的实际输出根目录
 
@@ -252,7 +251,6 @@ torchrun \
   --master_port="${MASTER_PORT}" \
   -m mllm.train.train_qwen \
   --model_name_or_path "${INIT_MODEL_PATH}" \
-  --map_task "${MAP_TASK}" \
   --version conv_qwen_3_Dinov2_huawei \
   --vision_tower "${VISION_TOWER}" \
   --mm_vision_tower_type "${MM_VISION_TOWER_TYPE}" \
