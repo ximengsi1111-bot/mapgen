@@ -28,6 +28,10 @@ def safe_extract_tar_gz(archive_path):
 
     target_dir = archive_path.with_suffix("").with_suffix("").resolve()
 
+    if target_dir.exists():
+        print(f"  already extracted: {target_dir.name}", flush=True)
+        return target_dir
+
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir).resolve()
         with tarfile.open(archive_path, "r:gz") as tar:
@@ -59,10 +63,11 @@ def extract_archives(root, delete_after=False):
     archives = sorted(root.glob("*.tar.gz"))
     if not archives:
         return
-    print(f"Found {len(archives)} .tar.gz archives, extracting...")
+    print(f"Found {len(archives)} .tar.gz archives, extracting...", flush=True)
     for archive in archives:
+        print(f"  [{archive.name}] extracting...", flush=True)
         target = safe_extract_tar_gz(archive)
-        print(f"  {archive.name} -> {target.name}/")
+        print(f"  [{archive.name}] done -> {target.name}/", flush=True)
         if delete_after:
             archive.unlink()
 
@@ -107,9 +112,8 @@ def split_one_image(image_path, output_dir, patch_size=256, stride=None, min_blu
 
             if min_blue_pixels > 0:
                 _, _, b = patch.split()
-                hist = b.histogram()
-                blue_nonzero = sum(hist[1:])
-                if blue_nonzero < min_blue_pixels:
+                h = b.histogram()
+                if sum(h[1:]) < min_blue_pixels:
                     continue
 
             name = f"r{row:03d}_c{col:03d}.png"
@@ -220,6 +224,7 @@ def process_dataset(dataset_root, patch_size=256, stride=None, prompt=DEFAULT_PR
             big_stem = img_path.stem
             out_dir = sample_dir / "rc_one_patch_release/center_line_v2/lane_ins_png" / big_stem
 
+            print(f"  [{sample_id}] processing {img_path.name}...", flush=True)
             patches, orig_size, pad_size = split_one_image(img_path, out_dir, patch_size, stride, min_blue_pixels)
             jsonl_path = generate_jsonl(
                 sample_dir, root, sample_id, big_stem, patches, prompt,
@@ -228,9 +233,10 @@ def process_dataset(dataset_root, patch_size=256, stride=None, prompt=DEFAULT_PR
 
             print(
                 f"  {sample_id}/{img_path.name} -> "
-                f"lane_ins_png/{big_stem}/  ({len(patches)} patches)"
+                f"lane_ins_png/{big_stem}/  ({len(patches)} patches)",
+                flush=True,
             )
-            print(f"    jsonl: {jsonl_path.relative_to(root.parent)}")
+            print(f"    jsonl: {jsonl_path.relative_to(root.parent)}", flush=True)
             total_patches += len(patches)
             total_images += 1
 
@@ -264,7 +270,7 @@ def main():
     )
     parser.add_argument(
         "--min-blue-pixels", type=int, default=10,
-        help="Skip patches with fewer non-zero blue pixels (default: 10, 0=disable)",
+        help="Skip patches with < N non-zero blue pixels (default: 10, 0=disable)",
     )
     parser.add_argument(
         "--prompt",
