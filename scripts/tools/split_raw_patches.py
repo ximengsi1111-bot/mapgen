@@ -12,6 +12,7 @@ Output structure for each sample:
 
 import argparse
 import json
+import tarfile
 import sys
 from pathlib import Path
 
@@ -19,6 +20,35 @@ from PIL import Image
 
 
 DEFAULT_PROMPT = "<image>\nPlease construct the complete road map in the current BEV (Bird's Eye View) image patch."
+
+def safe_extract_tar_gz(archive_path):
+    """Extract a .tar.gz archive safely."""
+    target_dir = archive_path.with_suffix("").with_suffix("")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_resolved = target_dir.resolve()
+    with tarfile.open(archive_path, "r:gz") as tar:
+        for member in tar.getmembers():
+            member_path = (target_dir / member.name).resolve()
+            try:
+                member_path.relative_to(target_resolved)
+            except ValueError:
+                raise ValueError(f"unsafe archive member path: {member.name}")
+        tar.extractall(path=target_dir)
+    return target_dir
+
+
+def extract_archives(root, delete_after=False):
+    """Scan root for .tar.gz files and extract each."""
+    archives = sorted(root.glob("*.tar.gz"))
+    if not archives:
+        return
+    print(f"Found {len(archives)} .tar.gz archives, extracting...")
+    for archive in archives:
+        target = safe_extract_tar_gz(archive)
+        print(f"  {archive.name} -> {target.name}/")
+        if delete_after:
+            archive.unlink()
+
 
 
 def pad_to_multiple(image, patch_size):
@@ -87,10 +117,13 @@ def generate_jsonl(output_dir, dataset_root, sample_id, big_image_stem, patches,
     return jsonl_path
 
 
-def process_dataset(dataset_root, patch_size=256, stride=None, prompt=DEFAULT_PROMPT):
+def process_dataset(dataset_root, patch_size=256, stride=None, prompt=DEFAULT_PROMPT, extract=False):
     """Scan dataset/ and process every sample with infer_patch_tif/."""
     root = Path(dataset_root)
     img_extensions = (".tif", ".tiff", ".png", ".jpg", ".jpeg")
+
+    if extract:
+        extract_archives(root, delete_after=False)
 
     sample_dirs = sorted(
         d for d in root.iterdir()
@@ -158,12 +191,16 @@ def main():
         help="Stride between patches (default: equal to patch_size, no overlap)",
     )
     parser.add_argument(
+        "--extract", action="store_true",
+        help="Extract .tar.gz archives in dataset-root before processing",
+    )
+    parser.add_argument(
         "--prompt",
         default=DEFAULT_PROMPT,
         help="Inference prompt for test.jsonl conversations",
     )
     args = parser.parse_args()
-    process_dataset(args.dataset_root, args.patch_size, args.stride, args.prompt)
+    process_dataset(args.dataset_root, args.patch_size, args.stride, args.prompt, args.extract)
 
 
 if __name__ == "__main__":
