@@ -80,7 +80,7 @@ def pad_to_multiple(image, patch_size):
     return result
 
 
-def split_one_image(image_path, output_dir, patch_size=256, stride=None):
+def split_one_image(image_path, output_dir, patch_size=256, stride=None, min_blue_pixels=10):
     """Split a single large image into patches, save to output_dir.
     Returns (patches, original_size, padded_size)."""
     if stride is None:
@@ -104,6 +104,14 @@ def split_one_image(image_path, output_dir, patch_size=256, stride=None):
         x = 0
         while x + patch_size <= w:
             patch = img.crop((x, y, x + patch_size, y + patch_size))
+
+            if min_blue_pixels > 0:
+                _, _, b = patch.split()
+                hist = b.histogram()
+                blue_nonzero = sum(hist[1:])
+                if blue_nonzero < min_blue_pixels:
+                    continue
+
             name = f"r{row:03d}_c{col:03d}.png"
             patch.save(output_dir / name, format="PNG")
             patches.append((row, col))
@@ -176,7 +184,7 @@ def generate_jsonl(output_dir, dataset_root, sample_id, big_image_stem, patches,
 
 
 
-def process_dataset(dataset_root, patch_size=256, stride=None, prompt=DEFAULT_PROMPT, extract=False):
+def process_dataset(dataset_root, patch_size=256, stride=None, prompt=DEFAULT_PROMPT, extract=False, min_blue_pixels=10):
     """Scan dataset/ and process every sample with inter_patch_tif/."""
     root = Path(dataset_root)
     img_extensions = (".tif", ".tiff", ".png", ".jpg", ".jpeg")
@@ -212,7 +220,7 @@ def process_dataset(dataset_root, patch_size=256, stride=None, prompt=DEFAULT_PR
             big_stem = img_path.stem
             out_dir = sample_dir / "rc_one_patch_release/center_line_v2/lane_ins_png" / big_stem
 
-            patches, orig_size, pad_size = split_one_image(img_path, out_dir, patch_size, stride)
+            patches, orig_size, pad_size = split_one_image(img_path, out_dir, patch_size, stride, min_blue_pixels)
             jsonl_path = generate_jsonl(
                 sample_dir, root, sample_id, big_stem, patches, prompt,
                 original_image_size=orig_size, padded_image_size=pad_size
@@ -255,12 +263,16 @@ def main():
         help="Extract .tar.gz archives in dataset-root before processing",
     )
     parser.add_argument(
+        "--min-blue-pixels", type=int, default=10,
+        help="Skip patches with fewer non-zero blue pixels (default: 10, 0=disable)",
+    )
+    parser.add_argument(
         "--prompt",
         default=DEFAULT_PROMPT,
         help="Inference prompt for test.jsonl conversations",
     )
     args = parser.parse_args()
-    process_dataset(args.dataset_root, args.patch_size, args.stride, args.prompt, args.extract)
+    process_dataset(args.dataset_root, args.patch_size, args.stride, args.prompt, args.extract, args.min_blue_pixels)
 
 
 if __name__ == "__main__":
