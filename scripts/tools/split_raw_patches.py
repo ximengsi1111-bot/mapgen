@@ -13,6 +13,7 @@ Output structure for each sample:
 import argparse
 import json
 import tarfile
+import time
 import sys
 from pathlib import Path
 
@@ -112,8 +113,8 @@ def split_one_image(image_path, output_dir, patch_size=256, stride=None, min_blu
 
             if min_blue_pixels > 0:
                 _, _, b = patch.split()
-                h = b.histogram()
-                if sum(h[1:]) < min_blue_pixels:
+                blue_hist = b.histogram()
+                if sum(blue_hist[1:]) < min_blue_pixels:
                     continue
 
             name = f"r{row:03d}_c{col:03d}.png"
@@ -224,8 +225,10 @@ def process_dataset(dataset_root, patch_size=256, stride=None, prompt=DEFAULT_PR
             big_stem = img_path.stem
             out_dir = sample_dir / "rc_one_patch_release/center_line_v2/lane_ins_png" / big_stem
 
-            print(f"  [{sample_id}] processing {img_path.name}...", flush=True)
+            print(f"  [{sample_id}] {img_path.name}...", flush=True)
+            t0 = time.time()
             patches, orig_size, pad_size = split_one_image(img_path, out_dir, patch_size, stride, min_blue_pixels)
+            elapsed = time.time() - t0
             jsonl_path = generate_jsonl(
                 sample_dir, root, sample_id, big_stem, patches, prompt,
                 original_image_size=orig_size, padded_image_size=pad_size
@@ -233,7 +236,7 @@ def process_dataset(dataset_root, patch_size=256, stride=None, prompt=DEFAULT_PR
 
             print(
                 f"  {sample_id}/{img_path.name} -> "
-                f"lane_ins_png/{big_stem}/  ({len(patches)} patches)",
+                f"lane_ins_png/{big_stem}/  ({len(patches)} patches, {elapsed:.1f}s)",
                 flush=True,
             )
             print(f"    jsonl: {jsonl_path.relative_to(root.parent)}", flush=True)
