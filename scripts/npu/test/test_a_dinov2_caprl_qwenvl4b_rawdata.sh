@@ -245,7 +245,7 @@ run_one_checkpoint() {
   TEST_JSON_FILES=()
   while IFS= read -r -d '' f; do
     TEST_JSON_FILES+=("$f")
-  done < <(find "${DATASET_ROOT}" -mindepth 3 -maxdepth 5 -name '\''*.jsonl'\'' -path '\''*/test/*'\'' -print0 2>/dev/null)
+  done < <(find "${DATASET_ROOT}" -mindepth 3 -maxdepth 5 -name "*.jsonl" -path "*/test/*" -print0 2>/dev/null)
 
   if [ ${#TEST_JSON_FILES[@]} -eq 0 ]; then
     echo "Error: no test/*.jsonl found under ${DATASET_ROOT}"
