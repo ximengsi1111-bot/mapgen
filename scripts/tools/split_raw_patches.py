@@ -115,19 +115,57 @@ def split_one_image(image_path, output_dir, patch_size=256, stride=None):
     return patches, original_size, padded_size
 
 
-def generate_jsonl(output_dir, dataset_root, sample_id, big_image_stem, patches, prompt):
+def generate_jsonl(output_dir, dataset_root, sample_id, big_image_stem, patches, prompt,
+                   original_image_size=None, padded_image_size=None):
     """Generate a jsonl file for a single big image's patches."""
     jsonl_dir = output_dir / "rc_one_patch_release/center_line_v2/test"
     jsonl_dir.mkdir(parents=True, exist_ok=True)
     jsonl_path = jsonl_dir / f"{big_image_stem}.jsonl"
 
+    src_w, src_h = padded_image_size or (0, 0)
+    orig_w, orig_h = original_image_size or src_w, src_h
+
     with open(jsonl_path, "w", encoding="utf-8") as f:
         for row, col in patches:
+            x0 = col * 256
+            y0 = row * 256
             patch_name = f"r{row:03d}_c{col:03d}.png"
             image_rel = f"{sample_id}/rc_one_patch_release/center_line_v2/lane_ins_png/{big_image_stem}/{patch_name}"
+
+            meta = {
+                "tile_id": big_image_stem,
+                "log_id": big_image_stem,
+                "patch_row": row,
+                "patch_col": col,
+                "row": row,
+                "col": col,
+                "x0": x0,
+                "y0": y0,
+                "patch_size": 256,
+                "stride": 256,
+                "source_image_size": [src_w, src_h],
+                "original_source_image_size": [orig_w, orig_h],
+                "coord_system": "patch_norm1000",
+                "task_mode": "state_update_centerline_intersection",
+                "raw_sample_root": str(output_dir),
+                "scan_order": "row_major_top_to_bottom_left_to_right",
+                "available_neighbors": ["left", "top"],
+                "train_shuffle_allowed": True,
+                "trace_source_train": "none",
+                "trace_source_infer": "predicted_left_top_neighbors",
+                "phase": "phase_a",
+                "coord_mode": "norm1000",
+                "coord_range": 1000,
+                "pixel_patch_size": 256,
+                "patch_width": 256,
+                "patch_height": 256,
+                "intersection_hint_source_train": "none",
+            }
+
             record = {
-                "id": f"{sample_id}_{big_image_stem}_{patch_name.replace('.png', '')}",
+                "id": f"{sample_id}_{big_image_stem}_{patch_name.replace('''.png''', '''''')}",
                 "image": image_rel,
+                "meta": meta,
                 "conversations": [
                     {"from": "human", "value": prompt}
                 ],
@@ -135,6 +173,7 @@ def generate_jsonl(output_dir, dataset_root, sample_id, big_image_stem, patches,
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     return jsonl_path
+
 
 
 def process_dataset(dataset_root, patch_size=256, stride=None, prompt=DEFAULT_PROMPT, extract=False):
