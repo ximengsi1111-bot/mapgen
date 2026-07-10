@@ -22,18 +22,42 @@ from PIL import Image
 DEFAULT_PROMPT = "<image>\nPlease construct the complete road map in the current BEV (Bird's Eye View) image patch."
 
 def safe_extract_tar_gz(archive_path):
-    """Extract a .tar.gz archive safely."""
+    """Extract a .tar.gz archive, stripping a single top-level directory if present."""
+    import shutil
+    import tempfile
+
     target_dir = archive_path.with_suffix("").with_suffix("")
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target_resolved = target_dir.resolve()
-    with tarfile.open(archive_path, "r:gz") as tar:
-        for member in tar.getmembers():
-            member_path = (target_dir / member.name).resolve()
-            try:
-                member_path.relative_to(target_resolved)
-            except ValueError:
-                raise ValueError(f"unsafe archive member path: {member.name}")
-        tar.extractall(path=target_dir)
+
+    # Extract to temp dir first
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        with tarfile.open(archive_path, "r:gz") as tar:
+            for member in tar.getmembers():
+                member_path = (tmp_path / member.name).resolve()
+                try:
+                    member_path.relative_to(tmp_path.resolve())
+                except ValueError:
+                    raise ValueError(f"unsafe archive member path: {member.name}")
+            tar.extractall(path=tmp_path)
+
+        # If there is a single top-level dir, lift its contents up
+        contents = sorted(tmp_path.iterdir())
+        if len(contents) == 1 and contents[0].is_dir():
+            source = contents[0]
+        else:
+            source = tmp_path
+
+        # Copy contents to final target
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for item in source.iterdir():
+            dest = target_dir / item.name
+            if dest.exists():
+                if dest.is_dir():
+                    shutil.rmtree(dest)
+                else:
+                    dest.unlink()
+            shutil.move(str(item), str(dest))
+
     return target_dir
 
 
