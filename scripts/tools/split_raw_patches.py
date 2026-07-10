@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Split large images in iner_patch_tif/ into 256x256 patches
+Split large images in inter_patch_tif/ into 256x256 patches
 and generate per-image test.jsonl files.
 
 Output structure for each sample:
@@ -135,7 +135,7 @@ def generate_jsonl(output_dir, dataset_root, sample_id, big_image_stem, patches,
 
 
 def process_dataset(dataset_root, patch_size=256, stride=None, prompt=DEFAULT_PROMPT, extract=False):
-    """Scan dataset/ and process every sample with iner_patch_tif/."""
+    """Scan dataset/ and process every sample with inter_patch_tif/."""
     root = Path(dataset_root)
     img_extensions = (".tif", ".tiff", ".png", ".jpg", ".jpeg")
 
@@ -144,11 +144,11 @@ def process_dataset(dataset_root, patch_size=256, stride=None, prompt=DEFAULT_PR
 
     sample_dirs = sorted(
         d for d in root.iterdir()
-        if d.is_dir() and (d / "rc_one_patch_release/center_line_v2/iner_patch_tif").is_dir()
+        if d.is_dir() and (d / "rc_one_patch_release/center_line_v2/inter_patch_tif").is_dir()
     )
 
     if not sample_dirs:
-        print(f"Error: no sample directories (with iner_patch_tif/) found under {root}")
+        print(f"Error: no sample directories (with inter_patch_tif/) found under {root}")
         sys.exit(1)
 
     total_patches = 0
@@ -156,14 +156,14 @@ def process_dataset(dataset_root, patch_size=256, stride=None, prompt=DEFAULT_PR
 
     for sample_dir in sample_dirs:
         sample_id = sample_dir.name
-        infer_dir = sample_dir / "rc_one_patch_release/center_line_v2/iner_patch_tif"
+        infer_dir = sample_dir / "rc_one_patch_release/center_line_v2/inter_patch_tif"
         image_files = sorted(
             p for p in infer_dir.iterdir()
             if p.is_file() and p.suffix.lower() in img_extensions
         )
 
         if not image_files:
-            print(f"  [SKIP] {sample_id}/iner_patch_tif/ - no image files found")
+            print(f"  [SKIP] {sample_id}/inter_patch_tif/ - no image files found")
             continue
 
         for img_path in image_files:
