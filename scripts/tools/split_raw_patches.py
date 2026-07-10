@@ -19,7 +19,7 @@ from pathlib import Path
 from PIL import Image
 
 
-DEFAULT_PROMPT = "<image>\nPlease construct the complete road map in the current BEV (Bird's Eye View) image patch."
+DEFAULT_PROMPT = "<image>\nPlease construct the complete road map in the current BEV (Bird's Eye View) image patch.\nCoordinates use a normalized 0-1000 grid over the original 256x256 image patch.\n\nIncoming traces JSON:\n[]\n\nIncoming intersections JSON:\n[]"
 
 def safe_extract_tar_gz(archive_path):
     """Extract a .tar.gz archive, stripping a single top-level directory if present."""
@@ -81,7 +81,8 @@ def pad_to_multiple(image, patch_size):
 
 
 def split_one_image(image_path, output_dir, patch_size=256, stride=None):
-    """Split a single large image into patches, save to output_dir, return list of (row, col)."""
+    """Split a single large image into patches, save to output_dir.
+    Returns (patches, original_size, padded_size)."""
     if stride is None:
         stride = patch_size
 
@@ -90,8 +91,10 @@ def split_one_image(image_path, output_dir, patch_size=256, stride=None):
     img = Image.open(image_path)
     if img.mode not in ("RGB", "RGBA"):
         img = img.convert("RGB")
+    original_size = img.size
     img = pad_to_multiple(img, patch_size)
-    w, h = img.size
+    padded_size = img.size
+    w, h = padded_size
 
     patches = []
     row = 0
@@ -109,7 +112,7 @@ def split_one_image(image_path, output_dir, patch_size=256, stride=None):
         row += 1
         y = row * stride
 
-    return patches
+    return patches, original_size, padded_size
 
 
 def generate_jsonl(output_dir, dataset_root, sample_id, big_image_stem, patches, prompt):
@@ -170,9 +173,10 @@ def process_dataset(dataset_root, patch_size=256, stride=None, prompt=DEFAULT_PR
             big_stem = img_path.stem
             out_dir = sample_dir / "rc_one_patch_release/center_line_v2/lane_ins_png" / big_stem
 
-            patches = split_one_image(img_path, out_dir, patch_size, stride)
+            patches, orig_size, pad_size = split_one_image(img_path, out_dir, patch_size, stride)
             jsonl_path = generate_jsonl(
-                sample_dir, root, sample_id, big_stem, patches, prompt
+                sample_dir, root, sample_id, big_stem, patches, prompt,
+                original_image_size=orig_size, padded_image_size=pad_size
             )
 
             print(
