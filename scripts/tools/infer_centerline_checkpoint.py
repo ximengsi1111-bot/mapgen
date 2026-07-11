@@ -908,6 +908,7 @@ def main():
         else:
             device_str = "cpu"
     parser = argparse.ArgumentParser()
+    parser.add_argument("--batch-size", type=int, default=1, help="Batch size per GPU (default 1)")
     parser.add_argument("--checkpoint-dir", required=True)
     parser.add_argument("--image", default="")
     parser.add_argument("--test-json", default="")
@@ -1030,14 +1031,37 @@ def main():
         rank_suffix = f"rank{torch.distributed.get_rank()}_"
 
     results = []
-    for idx, record in indexed_records:
-        image_path = Path(record["image"])
-        if args.test_json:
-            image_path = Path(args.image_folder) / image_path
-        image_path = image_path.resolve()
+    # Batch inference support
+    batch_size = max(1, getattr(args, "batch_size", 1))
+    for batch_start in range(0, len(indexed_records), batch_size):
+        batch = indexed_records[batch_start:batch_start + batch_size]
+        batch_images = []
+        batch_image_sizes = []
+        batch_cfg = []
+        batch_prompts = []
+        batch_records = []
 
-        image = Image.open(image_path).convert("RGB")
-        images_tensor = process_images([image], image_processor, model.config)
+        for _idx, _record in batch:
+            _image_path = Path(_record["image"])
+            if args.test_json:
+                _image_path = Path(args.image_folder) / _image_path
+            _image_path = _image_path.resolve()
+            _image = Image.open(_image_path).convert("RGB")
+            batch_images.append(_image)
+            batch_image_sizes.append(_image.size)
+            batch_records.append((_idx, _record, _image_path, _image))
+
+            _cfg_resolve = resolve_coord_config(_record, args)
+
+            if args.prompt_mode == "dataset" and _record.get("conversations"):
+                _pt = _record["conversations"][0]["value"]
+            else:
+                _pt = args.prompt
+            batch_prompts.append(_pt)
+            batch_cfg.append(_cfg_resolve)
+
+        # Process all images in batch
+        images_tensor = process_images(batch_images, image_processor, model.config)
         vision_tower = model.get_vision_tower()
         dtype = vision_tower.dtype if vision_tower is not None else next(model.parameters()).dtype
         image_device = vision_tower.device if vision_tower is not None else model.device
@@ -1045,135 +1069,78 @@ def main():
             images_tensor = [img.to(dtype=dtype, device=image_device) for img in images_tensor]
         else:
             images_tensor = images_tensor.to(dtype=dtype, device=image_device)
+        for b_idx, (_idx, _record, _image_path, _image) in enumerate(batch_records):
+            idx = _idx
+            record = _record
+            image_path = _image_path
+            image = _image
 
-        if args.prompt_mode == "dataset" and record.get("conversations"):
-            prompt_text = record["conversations"][0]["value"]
-            if args.map_task == "lane_given_intersection" and len(record.get("conversations", [])) > 1:
-                try:
-                    gt = json.loads(record["conversations"][1]["value"])
-                    lines_gt = gt.get("lines", []) if isinstance(gt, dict) else (gt if isinstance(gt, list) else [])
-                    intersections = [l for l in lines_gt if l.get("category") == "intersection"]
-                    if intersections:
-                        inter_json = json.dumps(intersections, ensure_ascii=False, separators=(",", ":"))
-                        prompt_text += "\n\nIntersection geometry for this patch (ground truth):\n" + inter_json + "\n\nUse the intersection geometry as known context. Predict only the lane centerlines."
-                except (json.JSONDecodeError, KeyError, TypeError):
-                    pass
-        else:
-            prompt_text = args.prompt
-        prompt = build_prompt(prompt_text, conv_template)
+            image_path = Path(record["image"])
+            if args.prompt_mode == "dataset" and record.get("conversations"):
+                prompt_text = record["conversations"][0]["value"]
+                if args.map_task == "lane_given_intersection" and len(record.get("conversations", [])) > 1:
+                    try:
+                        gt = json.loads(record["conversations"][1]["value"])
+                        lines_gt = gt.get("lines", []) if isinstance(gt, dict) else (gt if isinstance(gt, list) else [])
+                        intersections = [l for l in lines_gt if l.get("category") == "intersection"]
+                        if intersections:
+                            inter_json = json.dumps(intersections, ensure_ascii=False, separators=(",", ":"))
+                            prompt_text += "\n\nIntersection geometry for this patch (ground truth):\n" + inter_json + "\n\nUse the intersection geometry as known context. Predict only the lane centerlines."
+                    except (json.JSONDecodeError, KeyError, TypeError):
+                        pass
+            else:
+                prompt_text = args.prompt
+            prompt = build_prompt(prompt_text, conv_template)
 
-        input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
-        input_ids = input_ids.unsqueeze(0).to(model.device)
-        generation_config = getattr(model, "generation_config", None)
-        pad_token_id = getattr(generation_config, "pad_token_id", None) or tokenizer.pad_token_id
-        eos_token_id = getattr(generation_config, "eos_token_id", None) or tokenizer.eos_token_id
-        attention_mask = input_ids.ne(pad_token_id).to(model.device)
+            input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
+            input_ids = input_ids.unsqueeze(0).to(model.device)
+            generation_config = getattr(model, "generation_config", None)
+            pad_token_id = getattr(generation_config, "pad_token_id", None) or tokenizer.pad_token_id
+            eos_token_id = getattr(generation_config, "eos_token_id", None) or tokenizer.eos_token_id
+            attention_mask = input_ids.ne(pad_token_id).to(model.device)
 
-        generate_kwargs = {
-            "attention_mask": attention_mask,
-            "images": images_tensor,
-            "image_sizes": [image.size],
-            "max_new_tokens": args.max_new_tokens,
-            "use_cache": True,
-            "do_sample": args.temperature > 0,
-            "num_beams": 1,
-            "pad_token_id": pad_token_id,
-            "eos_token_id": eos_token_id,
-        }
-        if args.temperature > 0:
-            generate_kwargs["temperature"] = args.temperature
+            generate_kwargs = {
+                "attention_mask": attention_mask,
+                "images": images_tensor,
+                "image_sizes": [image.size],
+                "max_new_tokens": args.max_new_tokens,
+                "use_cache": True,
+                "do_sample": args.temperature > 0,
+                "num_beams": 1,
+                "pad_token_id": pad_token_id,
+                "eos_token_id": eos_token_id,
+            }
+            if args.temperature > 0:
+                generate_kwargs["temperature"] = args.temperature
 
-        with torch.inference_mode():
-            output_ids = model.generate(input_ids, **generate_kwargs)
+            with torch.inference_mode():
+                output_ids = model.generate(input_ids, **generate_kwargs)
 
-        decoded_ids, decoded_mode = completion_token_ids(output_ids, input_ids)
+            decoded_ids, decoded_mode = completion_token_ids(output_ids, input_ids)
 
-        raw_prediction = tokenizer.batch_decode(
-            decoded_ids.unsqueeze(0),
-            skip_special_tokens=False,
-        )[0].strip()
-        prediction = normalize_prediction_text(raw_prediction)
-        prediction_json = extract_json_payload(prediction)
-        coord_cfg = resolve_coord_config(record, args)
+            raw_prediction = tokenizer.batch_decode(
+                decoded_ids.unsqueeze(0),
+                skip_special_tokens=False,
+            )[0].strip()
+            prediction = normalize_prediction_text(raw_prediction)
+            prediction_json = extract_json_payload(prediction)
+            coord_cfg = resolve_coord_config(record, args)
 
-        parse_ok = False
-        parsed_items = []
-        parsed_items_pixel = []
-        parse_error = ""
-        try:
-            effective_map_task = "lane" if args.map_task == "lane_given_intersection" else args.map_task
-            parsed_items = parse_centerline_json(
-                prediction_json,
-                map_task=effective_map_task,
-                patch_size=coord_cfg["patch_size"],
-                coord_mode=coord_cfg["coord_mode"],
-                coord_range=coord_cfg["coord_range"],
-            )
-            parsed_items_pixel = convert_items(
-                parsed_items,
-                coord_cfg["coord_mode"],
-                COORD_MODE_PIXEL,
-                coord_cfg["patch_width"],
-                coord_cfg["patch_height"],
-                coord_range=coord_cfg["coord_range"],
-                clamp=True,
-            )
-            prediction_json = payload_to_text({"lines": parsed_items})
-            parse_ok = True
-        except Exception as exc:
-            parse_error = str(exc)
-        prediction_json_pixel = payload_to_text({"lines": parsed_items_pixel}) if parse_ok else ""
-        origin_record = {
-            "meta": record.get("meta", {}),
-            "patch_size": coord_cfg["patch_size"],
-            "patch_width": coord_cfg["patch_width"],
-            "patch_height": coord_cfg["patch_height"],
-        }
-        x0, y0 = record_origin(origin_record)
-        meta = record.get("meta", {})
-        row = int(meta.get("row", meta.get("patch_row", y0 // max(coord_cfg["patch_height"], 1))))
-        col = int(meta.get("col", meta.get("patch_col", x0 // max(coord_cfg["patch_width"], 1))))
-        tile_id = meta.get("tile_id", record.get("tile_id", "tile"))
-        lines_global = offset_lines(parsed_items_pixel, x0, y0) if parse_ok else []
-
-        result = {
-            "checkpoint_dir": str(checkpoint_dir),
-            "image": str(image_path),
-            "record_id": record.get("id", f"sample_{idx}"),
-            "tile_id": tile_id,
-            "row": row,
-            "col": col,
-            "x0": x0,
-            "y0": y0,
-            "meta": record.get("meta", {}),
-            "coord_mode": coord_cfg["coord_mode"],
-            "coord_range": coord_cfg["coord_range"],
-            "patch_size": coord_cfg["patch_size"],
-            "patch_width": coord_cfg["patch_width"],
-            "patch_height": coord_cfg["patch_height"],
-            "prompt": prompt,
-            "conv_template": conv_template,
-            "raw_prediction": raw_prediction,
-            "prediction": prediction,
-            "prediction_json": prediction_json,
-            "prediction_json_pixel": prediction_json_pixel,
-            "parse_ok": parse_ok,
-            "num_items": len(parsed_items) if parse_ok else 0,
-            "parse_error": parse_error,
-            "lines_local": parsed_items_pixel,
-            "lines_local_model": parsed_items,
-            "lines_global": lines_global,
-            "input_token_len": int(input_ids.shape[1]),
-            "output_token_len": int(output_ids.shape[1]),
-            "decoded_token_len": int(decoded_ids.numel()),
-            "decoded_mode": decoded_mode,
-            "manifest": manifest,
-        }
-        if len(record.get("conversations", [])) > 1:
-            result["ground_truth"] = record["conversations"][1]["value"]
+            parse_ok = False
+            parsed_items = []
+            parsed_items_pixel = []
+            parse_error = ""
             try:
-                result["ground_truth_pixel"] = convert_payload_text(
-                    result["ground_truth"],
+                effective_map_task = "lane" if args.map_task == "lane_given_intersection" else args.map_task
+                parsed_items = parse_centerline_json(
+                    prediction_json,
+                    map_task=effective_map_task,
+                    patch_size=coord_cfg["patch_size"],
+                    coord_mode=coord_cfg["coord_mode"],
+                    coord_range=coord_cfg["coord_range"],
+                )
+                parsed_items_pixel = convert_items(
+                    parsed_items,
                     coord_cfg["coord_mode"],
                     COORD_MODE_PIXEL,
                     coord_cfg["patch_width"],
@@ -1181,48 +1148,111 @@ def main():
                     coord_range=coord_cfg["coord_range"],
                     clamp=True,
                 )
-            except Exception:
-                result["ground_truth_pixel"] = result["ground_truth"]
-            if args.eval_centerline:
-                result["centerline_eval"] = vars(evaluate_one_sample(
-                    result["ground_truth_pixel"],
-                    prediction_json_pixel or prediction_json,
-                    parse_ok=parse_ok,
-                    meter_per_pixel=args.eval_meter_per_pixel,
-                    buffer_size=args.eval_buffer_size,
-                    match_threshold=args.eval_match_threshold,
-                ))
-        results.append(result)
+                prediction_json = payload_to_text({"lines": parsed_items})
+                parse_ok = True
+            except Exception as exc:
+                parse_error = str(exc)
+            prediction_json_pixel = payload_to_text({"lines": parsed_items_pixel}) if parse_ok else ""
+            origin_record = {
+                "meta": record.get("meta", {}),
+                "patch_size": coord_cfg["patch_size"],
+                "patch_width": coord_cfg["patch_width"],
+                "patch_height": coord_cfg["patch_height"],
+            }
+            x0, y0 = record_origin(origin_record)
+            meta = record.get("meta", {})
+            row = int(meta.get("row", meta.get("patch_row", y0 // max(coord_cfg["patch_height"], 1))))
+            col = int(meta.get("col", meta.get("patch_col", x0 // max(coord_cfg["patch_width"], 1))))
+            tile_id = meta.get("tile_id", record.get("tile_id", "tile"))
+            lines_global = offset_lines(parsed_items_pixel, x0, y0) if parse_ok else []
 
-        if sample_json_dir is not None:
-            sample_path = sample_json_dir / f"{rank_suffix}{idx:03d}_{sanitize_filename(str(result['record_id']))}.json"
-            sample_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+            result = {
+                "checkpoint_dir": str(checkpoint_dir),
+                "image": str(image_path),
+                "record_id": record.get("id", f"sample_{idx}"),
+                "tile_id": tile_id,
+                "row": row,
+                "col": col,
+                "x0": x0,
+                "y0": y0,
+                "meta": record.get("meta", {}),
+                "coord_mode": coord_cfg["coord_mode"],
+                "coord_range": coord_cfg["coord_range"],
+                "patch_size": coord_cfg["patch_size"],
+                "patch_width": coord_cfg["patch_width"],
+                "patch_height": coord_cfg["patch_height"],
+                "prompt": prompt,
+                "conv_template": conv_template,
+                "raw_prediction": raw_prediction,
+                "prediction": prediction,
+                "prediction_json": prediction_json,
+                "prediction_json_pixel": prediction_json_pixel,
+                "parse_ok": parse_ok,
+                "num_items": len(parsed_items) if parse_ok else 0,
+                "parse_error": parse_error,
+                "lines_local": parsed_items_pixel,
+                "lines_local_model": parsed_items,
+                "lines_global": lines_global,
+                "input_token_len": int(input_ids.shape[1]),
+                "output_token_len": int(output_ids.shape[1]),
+                "decoded_token_len": int(decoded_ids.numel()),
+                "decoded_mode": decoded_mode,
+                "manifest": manifest,
+            }
+            if len(record.get("conversations", [])) > 1:
+                result["ground_truth"] = record["conversations"][1]["value"]
+                try:
+                    result["ground_truth_pixel"] = convert_payload_text(
+                        result["ground_truth"],
+                        coord_cfg["coord_mode"],
+                        COORD_MODE_PIXEL,
+                        coord_cfg["patch_width"],
+                        coord_cfg["patch_height"],
+                        coord_range=coord_cfg["coord_range"],
+                        clamp=True,
+                    )
+                except Exception:
+                    result["ground_truth_pixel"] = result["ground_truth"]
+                if args.eval_centerline:
+                    result["centerline_eval"] = vars(evaluate_one_sample(
+                        result["ground_truth_pixel"],
+                        prediction_json_pixel or prediction_json,
+                        parse_ok=parse_ok,
+                        meter_per_pixel=args.eval_meter_per_pixel,
+                        buffer_size=args.eval_buffer_size,
+                        match_threshold=args.eval_match_threshold,
+                    ))
+            results.append(result)
 
-        print(
-            json.dumps(
-                {
-                    "idx": idx,
-                    "record_id": result["record_id"],
-                    "image": result["image"],
-                    "parse_ok": parse_ok,
-                    "num_items": result["num_items"],
-                    "parse_error": parse_error,
-                    "prediction_preview": prediction_preview(prediction),
-                    "decoded_mode": result["decoded_mode"],
-                    "input_token_len": result["input_token_len"],
-                    "output_token_len": result["output_token_len"],
-                    "decoded_token_len": result["decoded_token_len"],
-                },
-                ensure_ascii=False,
+            if sample_json_dir is not None:
+                sample_path = sample_json_dir / f"{rank_suffix}{idx:03d}_{sanitize_filename(str(result['record_id']))}.json"
+                sample_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            print(
+                json.dumps(
+                    {
+                        "idx": idx,
+                        "record_id": result["record_id"],
+                        "image": result["image"],
+                        "parse_ok": parse_ok,
+                        "num_items": result["num_items"],
+                        "parse_error": parse_error,
+                        "prediction_preview": prediction_preview(prediction),
+                        "decoded_mode": result["decoded_mode"],
+                        "input_token_len": result["input_token_len"],
+                        "output_token_len": result["output_token_len"],
+                        "decoded_token_len": result["decoded_token_len"],
+                    },
+                    ensure_ascii=False,
+                )
             )
-        )
-        if args.print_full_output:
-            print("RAW_PREDICTION_START")
-            print(raw_prediction)
-            print("RAW_PREDICTION_END")
-            print("NORMALIZED_PREDICTION_START")
-            print(prediction)
-            print("NORMALIZED_PREDICTION_END")
+            if args.print_full_output:
+                print("RAW_PREDICTION_START")
+                print(raw_prediction)
+                print("RAW_PREDICTION_END")
+                print("NORMALIZED_PREDICTION_START")
+                print(prediction)
+                print("NORMALIZED_PREDICTION_END")
 
     if args.output_json:
         output_json_path = Path(args.output_json)
