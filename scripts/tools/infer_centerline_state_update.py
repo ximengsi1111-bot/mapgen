@@ -649,6 +649,7 @@ def main():
     parser.add_argument("--image-folder", required=True)
     parser.add_argument("--output-json", required=True)
     parser.add_argument("--vision_tower", default="", help="Override external DINO vision tower path when checkpoint metadata points elsewhere.")
+    parser.add_argument("--max-records", type=int, default=0, help="Limit to first N sorted records. 0 = no limit.")
     parser.add_argument("--mm_vision_tower_type", default="")
     parser.add_argument("--multi_vision_towers", default="")
     parser.add_argument("--multi_vision_tower_types", default="")
@@ -721,6 +722,8 @@ parser.add_argument("--conv-template", default="conv_qwen_3_state_update_centerl
     args.device = resolve_runtime_device(args.device, local_rank)
 
     all_records = sort_patch_records(load_json_or_jsonl(Path(args.patch_json)))
+    if args.max_records > 0:
+        all_records = all_records[:args.max_records]
     for global_idx, record in enumerate(all_records):
         record["_mllm_global_idx"] = global_idx
     if distributed:
