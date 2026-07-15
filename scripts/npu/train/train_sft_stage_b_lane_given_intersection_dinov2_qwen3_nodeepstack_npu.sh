@@ -18,7 +18,8 @@ exec > >(tee -a ${LOG_FILE}) 2>&1
 
 # ====================== 模型配方 ======================
 DATASET_PHASE=phase_b # 数据集阶段：phase_a是单patch推理；phase_b是状态更新推理
-MAP_TASK=lane_intersection # 任务类型: lane or lane_intersection.
+MAP_TASK=lane_given_intersection # 已知当前 patch 的路口几何，仅预测 lane centerline.
+TRAIN_CONV_TEMPLATE=conv_qwen_3_state_update_lane_given_intersection
 VISION_BACKBONE=dinov2 # Visual backbone selector used by the generic multi-vision launcher.
 # Vision assets for this recipe. Scripts only download the towers declared below.
 VISION_TOWER_NAME=facebook_dinov2-large # Single vision tower directory name under MODEL_OBS_PATH.
@@ -42,7 +43,9 @@ echo "============================================================"
 RUN_ID=${RUN_ID:-$(date -u +%Y%m%d_%H%M%S)}
 OBS_CACHE=${OBS_CACHE:-${USER_DIR}} # 昇腾服务器根目录
 MODEL_OBS_PATH=${MODEL_OBS_PATH:-obs://yw-ads-training-gy1/data/external/personal/h58801830/whu/jjh/checkpoints} # 从OBS中加载LLM与vision encoder权重
-QWEN_PATH=${QWEN_PATH:-${OBS_CACHE}/checkpoints/inputs/CapRL-Qwen3VL-4B} # 本地的Qwen-VL模型路径
+STAGE_A_CHECKPOINT_OBS_PATH=${STAGE_A_CHECKPOINT_OBS_PATH:-} # Stage-A lane_given_intersection checkpoint 的 OBS 目录。
+STAGE_A_CHECKPOINT_DIR=${STAGE_A_CHECKPOINT_DIR:-} # 已存在的本地 Stage-A checkpoint 目录，优先于 OBS。
+STAGE_A_DOWNLOAD_DIR=${STAGE_A_DOWNLOAD_DIR:-${OBS_CACHE}/checkpoints/inputs/stage_a_lane_given_intersection_${RUN_ID}} # Stage-A checkpoint 下载目录。
 DATASET_OBS_PATH=${DATASET_OBS_PATH:-obs://yw-ads-training-gy1/data/external/personal/h58801830/whu/jjh/data/data_lane_intersection_norm_sample_512_33w.zip} # 从OBS中加载数据集
 DATASET_DIR_NAME=${DATASET_DIR_NAME:-data_lane_intersection_norm_sample_512_33w} # 数据集解压后的目录名
 
@@ -89,9 +92,9 @@ VISION_LAYER_FUSION_TYPE=${VISION_LAYER_FUSION_TYPE:-mean}
 SWANLAB_ENABLE=${SWANLAB_ENABLE:-True}                                            
 export SWANLAB_API_KEY=${SWANLAB_API_KEY:-"5gIH7zqSwmo8dl1Ia5vRN"}                
 SWANLAB_PROJECT=${SWANLAB_PROJECT:-unimapgen_v9}                                  
-SWANLAB_GROUP=${SWANLAB_GROUP:-sft_phase_a_lane_intersection_dinov2_nodeepstack}
-SWANLAB_EXPERIMENT_NAME=${SWANLAB_EXPERIMENT_NAME:-sft_phase_a_lane_intersection_dinov2_qwen3vlcaprl4b_256_ep8}  
-SWANLAB_TAGS=${SWANLAB_TAGS:-sft,phase_a,lane_intersection,dinov2,qwen3vl8b,nodeepstack,unimapgen_v9}  
+SWANLAB_GROUP=${SWANLAB_GROUP:-sft_phase_b_lane_given_intersection_dinov2_nodeepstack}
+SWANLAB_EXPERIMENT_NAME=${SWANLAB_EXPERIMENT_NAME:-sft_phase_b_lane_given_intersection_dinov2_qwen3vlcaprl4b_from_stage_a}
+SWANLAB_TAGS=${SWANLAB_TAGS:-sft,phase_b,lane_given_intersection,dinov2,qwen3vl4b,nodeepstack,from_stage_a,unimapgen_v9}
 SWANLAB_MODE=${SWANLAB_MODE:-offline}                                             
 SWANLAB_API_HOST=${SWANLAB_API_HOST:-}                                            
 SWANLAB_WEB_HOST=${SWANLAB_WEB_HOST:-}
@@ -167,7 +170,7 @@ else
 fi
 MASTER_PORT=${MASTER_PORT:-6060} # 分布式通信主节点端口
 export NNODES NODE_RANK NPROC_PER_NODE MASTER_ADDR MASTER_PORT
-export RDZV_ID=${RDZV_ID:-sft_phase_a_lane_intersection_dinov2_${RUN_ID}} # 当前分布式任务唯一进程组标识，避免多任务通信串扰
+export RDZV_ID=${RDZV_ID:-sft_phase_b_lane_given_intersection_dinov2_${RUN_ID}} # 当前分布式任务唯一进程组标识，避免多任务通信串扰
 
 
 mkdir -p "${LOCAL_MODEL_SAVE_PATH}"
@@ -185,10 +188,17 @@ SWANLAB_LOG_DIR=${SWANLAB_LOG_DIR:-${OUTPUT_PATH}/swanlab} # SwanLab可视化工
 # 下载当前任务所需的模型权重与数据集文件，并校验本地必要路径是否存在
 python -c "import moxing as mox; mox.file.copy_parallel('${MODEL_OBS_PATH}/${VISION_TOWER_NAME}', '${VISION_TOWER}')"
 python -c "import moxing as mox; mox.file.copy('${DATASET_OBS_PATH}', '${DATASET_ZIP_PATH}')"
-mkdir -p "${DATASET_EXTRACT_ROOT}"
+mkdir -p "${DATASET_EXTRACT_ROOT}" "${STAGE_A_DOWNLOAD_DIR}"
 unzip -q "${DATASET_ZIP_PATH}" -d "${DATASET_EXTRACT_ROOT}"
-python -c "import moxing as mox; mox.file.copy_parallel('${MODEL_OBS_PATH}/CapRL-Qwen3VL-4B', '${QWEN_PATH}')"
-INIT_MODEL_PATH="${QWEN_PATH}" # 传入训练脚本train_qwen的初始模型路径，第二阶段训练会复用第一阶段产出的检查点
+if [ -n "${STAGE_A_CHECKPOINT_DIR}" ]; then
+  INIT_MODEL_PATH="${STAGE_A_CHECKPOINT_DIR}"
+elif [ -n "${STAGE_A_CHECKPOINT_OBS_PATH}" ]; then
+  python -c "import moxing as mox; mox.file.copy_parallel('${STAGE_A_CHECKPOINT_OBS_PATH}', '${STAGE_A_DOWNLOAD_DIR}')"
+  INIT_MODEL_PATH="${STAGE_A_DOWNLOAD_DIR}"
+else
+  echo "ERROR: Stage B requires STAGE_A_CHECKPOINT_DIR or STAGE_A_CHECKPOINT_OBS_PATH."
+  exit 1
+fi
 TRAIN_PATH="${DATASET_PATH}/${DATASET_PHASE}/train.jsonl" # 当前数据集阶段对应的训练集JSONL文件路径
 EVAL_PATH="${DATASET_PATH}/${DATASET_PHASE}/eval.jsonl" # 当前数据集阶段对应的验证集JSONL文件路径
 TEST_PATH="${DATASET_PATH}/${DATASET_PHASE}/test.jsonl" # 用于离线推理的测试集JSONL文件（历史兼容字段）
@@ -253,7 +263,7 @@ torchrun \
   -m mllm.train.train_qwen \
   --model_name_or_path "${INIT_MODEL_PATH}" \
   --map_task "${MAP_TASK}" \
-  --version conv_qwen_3_Dinov2_huawei \
+  --version "${TRAIN_CONV_TEMPLATE}" \
   --vision_tower "${VISION_TOWER}" \
   --mm_vision_tower_type "${MM_VISION_TOWER_TYPE}" \
   --input_image_size "${INPUT_IMAGE_SIZE}" \
@@ -296,7 +306,7 @@ torchrun \
   --best_infer_index_image_folder "${IMAGE_FOLDER}" \
   --best_infer_index_vision_tower "${VISION_TOWER}" \
   --best_infer_index_input_image_size "${INPUT_IMAGE_SIZE}" \
-  --best_infer_index_conv_template conv_qwen_3_Dinov2_huawei \
+  --best_infer_index_conv_template "${TRAIN_CONV_TEMPLATE}" \
   --best_infer_index_map_task "${MAP_TASK}" \
   --best_infer_index_num_samples "${BEST_INFER_INDEX_NUM_SAMPLES}" \
   --best_infer_index_eval_steps "${SAVE_STEPS}" \

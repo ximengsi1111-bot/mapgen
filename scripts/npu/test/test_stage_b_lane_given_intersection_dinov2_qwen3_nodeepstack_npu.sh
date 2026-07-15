@@ -25,7 +25,8 @@ exec > >(tee -a ${LOG_FILE}) 2>&1
 
 # 配方标识：固定任务、视觉架构、模型系列和训练变体。
 DATASET_PHASE=phase_b                                                             # 数据集阶段：phase_a 为 patch 推理，phase_b 为状态更新。
-MAP_TASK=lane_given_intersection                                                        # 任务类型：lane 或 lane_intersection。
+MAP_TASK=lane_given_intersection                                                  # 已知当前 patch 的路口几何，仅预测 lane centerline。
+INFER_CONV_TEMPLATE=conv_qwen_3_state_update_lane_given_intersection              # Stage-B 状态更新 + given-intersection 模板。
 VISION_BACKBONE=dinov2                                                            # 视觉骨干选择器，由通用多视觉启动器使用。
 # 本配方的视觉资产。脚本仅下载下面声明的视觉塔。
 VISION_TOWER_NAME=facebook_dinov2-large                                           # MODEL_OBS_PATH 下的视觉塔目录名。
@@ -347,7 +348,7 @@ torchrun \
     --patch-size 256 \
     --coord-mode "${COORD_MODE}" \
     --coord-range "${COORD_RANGE}" \
-    --conv-template conv_qwen_3_Dinov2_huawei \
+    --conv-template "${INFER_CONV_TEMPLATE}" \
     --output-dir "${output_dir}" \
     --sample-json-dir "${json_dir}" \
     --output-json "${summary_json}" \

@@ -507,6 +507,26 @@ conv_qwen_3_state_update_centerline = Conversation(
     sep="<|im_end|>\n",
 )
 
+conv_qwen_3_state_update_lane_given_intersection = Conversation(
+    system=(
+        "<|im_start|>system\n"
+        "You are a road-centerline reconstruction assistant for BEV road patches.\n"
+        "The intersection geometry for the current patch is provided as known context.\n"
+        "Use incoming traces from already processed neighboring patches as continuity hints.\n"
+        "Predict only lane centerline polylines inside the current patch.\n"
+        "Return only valid JSON in the required schema.\n"
+        "Include start_type and end_type for every centerline.\n"
+        "Do not output intersection records.\n"
+        "Keep all coordinates in the patch-local coordinate system."
+    ),
+    roles=("<|im_start|>user\n", "<|im_start|>assistant\n"),
+    version="qwen_v3",
+    messages=(),
+    offset=0,
+    sep_style=SeparatorStyle.QWEN_2,
+    sep="<|im_end|>\n",
+)
+
 
 # conv_qwen_2 = Conversation(
 #     system="",
@@ -596,6 +616,7 @@ conv_templates = {
     "conv_qwen_3_Dinov2_huawei": conv_qwen_3_Dinov2_huawei,
     "conv_qwen_2_state_update_centerline": conv_qwen_2_state_update_centerline,
     "conv_qwen_3_state_update_centerline": conv_qwen_3_state_update_centerline,
+    "conv_qwen_3_state_update_lane_given_intersection": conv_qwen_3_state_update_lane_given_intersection,
     "lane_given_intersection": conv_qwen_2_lane_given_intersection,
     "llama_2": conv_llama_2,
     "mistral_instruct": conv_mistral_instruct,

@@ -245,6 +245,30 @@ def make_user_prompt(patch_size: int, incoming_traces, incoming_intersections=No
     return "\n".join(parts)
 
 
+def append_given_intersection_prompt(prompt_text: str, record: dict) -> str:
+    """Append current-patch intersection GT, including an explicit empty list."""
+    intersections = []
+    conversations = record.get("conversations", [])
+    if len(conversations) > 1:
+        try:
+            gt = json.loads(conversations[1]["value"])
+            lines = gt.get("lines", []) if isinstance(gt, dict) else (gt if isinstance(gt, list) else [])
+            if isinstance(lines, list):
+                intersections = [
+                    line for line in lines
+                    if isinstance(line, dict) and line.get("category") == "intersection"
+                ]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
+    inter_json = json.dumps(intersections, ensure_ascii=False, separators=(",", ":"))
+    return (
+        prompt_text
+        + "\n\nIntersection geometry for this patch (ground truth):\n"
+        + inter_json
+        + "\n\nUse the intersection geometry as known context. Predict only the lane centerlines."
+    )
+
+
 def resolve_coord_config(record, args):
     cfg = record_coord_config(
         record,
@@ -673,7 +697,7 @@ def main():
     parser.add_argument("--whole-map-viz-dir", default="", help="Directory for stitched whole-map visualizations. Defaults to output-json sibling whole_map_viz/.")
     parser.add_argument("--skip-whole-map-viz", action="store_true", help="Disable stitched whole-map visualization output.")
     parser.add_argument("--map_task", "--map-task", choices=["lane", "lane_intersection", "lane_given_intersection"], default="lane_intersection")
-parser.add_argument("--conv-template", default="conv_qwen_3_state_update_centerline")
+    parser.add_argument("--conv-template", default="")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--patch-size", type=int, default=256)
     parser.add_argument("--coord-mode", choices=["auto", COORD_MODE_PIXEL, COORD_MODE_NORM1000], default="auto")
@@ -702,10 +726,12 @@ parser.add_argument("--conv-template", default="conv_qwen_3_state_update_centerl
     parser.add_argument("--world-size", type=int, default=None, help="Override world size. Defaults to WORLD_SIZE env.")
     parser.add_argument("--distributed-merge-timeout", type=int, default=7200, help="Seconds rank0 waits for rank summaries.")
     args = parser.parse_args()
-    # Auto-resolve conv_template from --map_task
+    # Resolve a Stage-B template when the caller does not provide one explicitly.
     if not args.conv_template:
-        from mllm.conversation import TASK_TEMPLATES
-        args.conv_template = TASK_TEMPLATES.get(args.map_task, "") or "conv_qwen_3_state_update_centerline"
+        if args.map_task == "lane_given_intersection":
+            args.conv_template = "conv_qwen_3_state_update_lane_given_intersection"
+        else:
+            args.conv_template = "conv_qwen_3_state_update_centerline"
 
     evaluate_records = print_eval_table = None
     evaluate_lane_intersection_records = print_lane_intersection_eval_tables = None
@@ -827,16 +853,8 @@ parser.add_argument("--conv-template", default="conv_qwen_3_state_update_centerl
             coord_range=coord_cfg["coord_range"],
         )
 
-        if args.map_task == "lane_given_intersection" and len(record.get("conversations", [])) > 1:
-            try:
-                gt = json.loads(record["conversations"][1]["value"])
-                lines_gt = gt.get("lines", []) if isinstance(gt, dict) else (gt if isinstance(gt, list) else [])
-                intersections = [l for l in lines_gt if l.get("category") == "intersection"]
-                if intersections:
-                    inter_json = json.dumps(intersections, ensure_ascii=False, separators=(",", ":"))
-                    prompt_text += "\n\nIntersection geometry for this patch (ground truth):\n" + inter_json + "\n\nUse the intersection geometry as known context. Predict only the lane centerlines."
-            except (json.JSONDecodeError, KeyError, TypeError):
-                pass
+        if args.map_task == "lane_given_intersection":
+            prompt_text = append_given_intersection_prompt(prompt_text, record)
 
         parse_ok = False
         parsed_lines_model = []

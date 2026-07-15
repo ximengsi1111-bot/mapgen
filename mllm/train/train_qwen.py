@@ -2152,6 +2152,43 @@ def _load_json_or_jsonl(file_path: str) -> List[dict]:
             return [json.loads(line) for line in f if line.strip()]
 
 
+def prepare_lane_given_intersection_conversations(conversations: Sequence[dict]) -> List[dict]:
+    """Inject intersection GT as context and keep only centerlines as targets."""
+    prepared = copy.deepcopy(list(conversations))
+    if len(prepared) < 2 or prepared[1].get("from") != "gpt":
+        return prepared
+
+    try:
+        gt = json.loads(prepared[1]["value"])
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return prepared
+
+    lines = gt.get("lines", []) if isinstance(gt, dict) else (gt if isinstance(gt, list) else [])
+    if not isinstance(lines, list):
+        return prepared
+
+    centerlines = [
+        line for line in lines
+        if isinstance(line, dict) and line.get("category", "centerline") == "centerline"
+    ]
+    intersections = [
+        line for line in lines
+        if isinstance(line, dict) and line.get("category") == "intersection"
+    ]
+    marker = "Intersection geometry for this patch (ground truth):"
+    if marker not in prepared[0].get("value", ""):
+        inter_json = json.dumps(intersections, ensure_ascii=False, separators=(",", ":"))
+        prepared[0]["value"] = prepared[0].get("value", "") + (
+            "\n\n" + marker + "\n"
+            + inter_json
+            + "\n\nUse the intersection geometry as known context. Predict only the lane centerlines."
+        )
+    prepared[1]["value"] = json.dumps(
+        {"lines": centerlines}, ensure_ascii=False, separators=(",", ":")
+    )
+    return prepared
+
+
 class LazySupervisedDataset(Dataset):
     """Dataset for supervised fine-tuning."""
 
@@ -2200,6 +2237,11 @@ class LazySupervisedDataset(Dataset):
         if isinstance(i, int):
             sources = [sources]
         assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
+        sources = copy.deepcopy(sources)
+        if self.data_args.map_task == "lane_given_intersection":
+            sources[0]["conversations"] = prepare_lane_given_intersection_conversations(
+                sources[0].get("conversations", [])
+            )
         if 'image' in sources[0]:
             image_file = self.list_data_dict[i]['image']
             img_path_idx = self.list_data_dict[i]['img_path_idx']
@@ -2227,30 +2269,11 @@ class LazySupervisedDataset(Dataset):
                 image = process_anyres_image(image, self.data_args.image_processor, self.data_args.image_grid_pinpoints)
             else:
                 image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
-        # lane_given_intersection: inject intersection GT into prompt, remove from target
-        if self.data_args.map_task == "lane_given_intersection" and len(sources) >= 1 and len(sources[0]) >= 2:
-            convs = sources[0]
-            if convs[1]["from"] == "gpt":
-                try:
-                    gt = json.loads(convs[1]["value"])
-                    lines = gt.get("lines", []) if isinstance(gt, dict) else (gt if isinstance(gt, list) else [])
-                    centerlines = [l for l in lines if l.get("category", "centerline") == "centerline"]
-                    intersections = [l for l in lines if l.get("category") == "intersection"]
-                    if intersections or centerlines != lines:
-                        inter_json = json.dumps(intersections, ensure_ascii=False, separators=(",", ":"))
-                        convs[0]["value"] += (
-                            "\n\nIntersection geometry for this patch (ground truth):\n"
-                            + inter_json
-                            + "\n\nUse the intersection geometry as known context. Predict only the lane centerlines."
-                        )
-                        convs[1]["value"] = json.dumps({"lines": centerlines}, ensure_ascii=False, separators=(",", ":"))
-                except (json.JSONDecodeError, KeyError, TypeError):
-                    pass
-        sources = preprocess_multimodal(
-                copy.deepcopy([e["conversations"] for e in sources]),
-                self.data_args)
+            sources = preprocess_multimodal(
+                    [e["conversations"] for e in sources],
+                    self.data_args)
         else:
-            sources = copy.deepcopy([e["conversations"] for e in sources])
+            sources = [e["conversations"] for e in sources]
         data_dict = preprocess(
             sources,
             self.tokenizer,
